@@ -1,12 +1,10 @@
-# “Hello World” For TensorRT Using TensorFlow And Python
-
+# Building An RNN Network Layer By Layer
 
 **Table Of Contents**
 - [Description](#description)
 - [How does this sample work?](#how-does-this-sample-work)
-	* [Freezing a TensorFlow graph](#freezing-a-tensorflow-graph)
-	* [Freezing a Keras model](#freezing-a-keras-model)
-- [Prerequisites](#prerequisites)
+	* [TensorRT API layers and ops](#tensorrt-api-layers-and-ops)
+- [Converting TensorFlow weights](#converting-tensorflow-weights)
 - [Running the sample](#running-the-sample)
 	* [Sample `--help` options](#sample-help-options)
 - [Additional resources](#additional-resources)
@@ -16,112 +14,106 @@
 
 ## Description
 
-This sample, end_to_end_tensorflow_mnist, trains a small, fully-connected model on the [MNIST](http://yann.lecun.com/exdb/mnist/) dataset and runs inference using TensorRT.
+This sample, sampleCharRNN, uses the TensorRT API to build an RNN network layer by layer, sets up weights and inputs/outputs and then performs inference. Specifically, this sample creates a CharRNN network that has been trained on the [Tiny Shakespeare](https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt) dataset. For more information about character level modeling, see [char-rnn](https://github.com/karpathy/char-rnn).
+
+TensorFlow has a useful  [RNN Tutorial](https://www.tensorflow.org/tutorials/recurrent)  which can be used to train a word level model. Word level models learn a probability distribution over a set of all possible word sequence. Since our goal is to train a char level model, which learns a probability distribution over a set of all possible characters, a few modifications will need to be made to get the TensorFlow sample to work. These modifications can be seen  [here](http://deeplearningathome.com/2016/10/Text-generation-using-deep-recurrent-neural-networks.html).
+
+There are also many GitHub repositories that contain CharRNN implementations that will work out of the box. [Tensorflow-char-rnn](https://github.com/crazydonkey200/tensorflow-char-rnn)  is one such implementation.
 
 ## How does this sample work?
 
-This sample is an end-to-end Python sample that trains a [small 3-layer model in TensorFlow and Keras](https://www.tensorflow.org/tutorials), freezes the model and writes it to a protobuf file, converts it to UFF, and finally runs inference using TensorRT.
+The CharRNN network is a fairly simple RNN network. The input into the network is a single character that is embedded into a vector of size 512. This embedded input is then supplied to a RNN layer containing two stacked LSTM cells. The output from the RNN layer is then supplied to a fully connected layer, which can be represented in TensorRT by a Matrix Multiply layer followed by an ElementWise sum layer. Constant layers are used to supply the weights and biases to the Matrix Multiply and ElementWise Layers, respectively. A TopK operation is then performed on the output of the ElementWise sum layer where `K = 1` to find the next predicted character in the sequence. For more information about these layers, see the [TensorRT API](http://docs.nvidia.com/deeplearning/sdk/tensorrt-api/index.html) documentation.
 
-### Freezing a TensorFlow graph
+This sample provides a pre-trained model called `model-20080.data-00000-of-00001` located in the `/usr/src/tensorrt/data/samples/char-rnn/model` directory, therefore, training is not required for this sample. The model used by this sample was trained using [tensorflow-char-rnn](https://github.com/crazydonkey200/tensorflow-char-rnn). This GitHub repository includes instructions on how to train and produce checkpoint that can be used by TensorRT.
 
-In order to use the command-line [UFF utility](https://docs.nvidia.com/deeplearning/sdk/tensorrt-api/python_api/uff/uff.html), TensorFlow graphs must be frozen and saved as `.pb` files.
+**Note:** If you wanted to train your own model and then perform inference with TensorRT, you will simply need to do a char to char comparison between TensorFlow and TensorRT.
 
-In this sample, the converter displays information about the input and output nodes, which you can use to the register inputs and outputs with the parser. In this case, we already know the details of the input and output nodes and have included them in the sample.
 
-### Freezing a Keras model
+### TensorRT API layers and ops
 
-You can use the following sample code to freeze a Keras model.
-```
-def save(model, filename):
-	# First freeze the graph and remove training nodes.
-	output_names = model.output.op.name
-	sess = tf.keras.backend.get_session()
-	frozen_graph = tf.graph_util.convert_variables_to_constants(sess, sess.graph.as_graph_def(), [output_names])
-	frozen_graph = tf.graph_util.remove_training_nodes(frozen_graph)
-	# Save the model
-	with open(filename, "wb") as ofile:
-		ofile.write(frozen_graph.SerializeToString())
-```
+In this sample, the following layers are used.  For more information about these layers, see the [TensorRT Developer Guide: Layers](https://docs.nvidia.com/deeplearning/sdk/tensorrt-developer-guide/index.html#layers) documentation.
 
-## Prerequisites
+[ElementWise](https://docs.nvidia.com/deeplearning/sdk/tensorrt-developer-guide/index.html#elementwise-layer)
+The ElementWise layer, also known as the Eltwise layer, implements per-element operations. The ElementWise layer is used to execute the second step of the functionality provided by a FullyConnected layer.
 
-1. Install the dependencies for Python.
-	-   For Python 2 users, from the root directory, run:
-		`python2 -m pip install -r requirements.txt`
+[MatrixMultiply](https://docs.nvidia.com/deeplearning/sdk/tensorrt-developer-guide/index.html#matrixmultiply-layer)
+The MatrixMultiply layer implements matrix multiplication for a collection of matrices. The Matrix Multiplication layer is used to execute the first step of the functionality provided by a FullyConnected layer.
 
-	-   For Python 3 users, from the root directory, run:
-		`python3 -m pip install -r requirements.txt`
+[RNNv2](https://docs.nvidia.com/deeplearning/sdk/tensorrt-developer-guide/index.html#rnnv2-layer)
+The RNNv2 layer implements recurrent layers such as Recurrent Neural Network (RNN), Gated Recurrent Units (GRU), and Long Short-Term Memory (LSTM). Supported types are RNN, GRU, and LSTM. It performs a recurrent operation, where the operation is defined by one of several well-known recurrent neural network (RNN) "cells".  This is the first layer in the network is an RNN layer. This is added and configured in the `addRNNv2Layer()` function. Weights are set for each gate and layer individually. The input format for RNNv2 is BSE (Batch, Sequence, Embedding).
 
-On PowerPC systems, you will need to manually install TensorFlow using IBM's [PowerAI](https://www.ibm.com/support/knowledgecenter/SS5SF7_1.6.0/navigation/pai_install.htm).
+[TopK](https://docs.nvidia.com/deeplearning/sdk/tensorrt-developer-guide/index.html#topk-layer)
+The TopK layer is used to identify the character that has the maximum probability of appearing next. The TopK layer finds the top K maximum (or minimum) elements along a dimension, returning a reduced tensor and a tensor of index positions.
 
-On Jetson boards, you will need to manually install TensorFlow by following the documentation for [Xavier](https://docs.nvidia.com/deeplearning/dgx/install-tf-xavier/index.html) or [TX2](https://docs.nvidia.com/deeplearning/dgx/install-tf-jetsontx2/index.html).
+## Converting TensorFlow weights
 
-2. Install the UFF toolkit and graph surgeon; depending on your TensorRT installation method, to install the toolkit and graph surgeon, choose the method you used to install TensorRT for instructions (see [TensorRT Installation Guide: Installing TensorRT](https://docs.nvidia.com/deeplearning/sdk/tensorrt-install-guide/index.html#installing)).
+If you want to train your own model and not use the pre-trained model included in this sample, you’ll need to convert the TensorFlow weights into a format that TensorRT can use.
+
+1.  Locate TensorFlow weights dumping script:  
+`/usr/src/tensorrt/samples/common/dumpTFWts.py`
+
+	This script has been provided to extract the weights from the model checkpoint files that are created during training. Use `dumpTFWts.py -h` for directions on the usage of the script.
+
+2.  Convert the TensorFlow weights using the following command:
+ `dumpTFWts.py -m /path/to/checkpoint -o /path/to/output`
+
 
 ## Running the sample
 
-1.  Run the sample to train the model and write out the frozen graph:
+1.  Compile this sample by running `make` in the `<TensorRT root directory>/samples/sampleCharRNN` directory. The binary named `sample_char_rnn` will be created in the `<TensorRT root directory>/bin` directory.
 	```
-	mkdir models
-	python model.py
+	cd <TensorRT root directory>/samples
+	make
 	```
+	Where `<TensorRT root directory>` is where you installed TensorRT.
 
-2.  Convert the `.pb` file to `.uff` using the convert-to-uff utility:
-	`convert-to-uff models/lenet5.pb`
+2.  Run the sample to generate characters based on the trained model:
+	`./sample_char_rnn --datadir=<path/to/data>`
 
-	Depending on how you installed TensorRT, this utility may also be located in `/usr/lib/python2.7/dist-packages/uff/bin/convert_to_uff.py` or `/usr/lib/python<PYTHON3 VERSION>/site-packages/uff/bin/convert_to_uff.py`.
-
-3.  Create a TensorRT inference engine from the UFF file and run inference:
-	`python sample.py [-d DATA_DIR]`
-
-	**Note:** If the TensorRT sample data is not installed in the default location, for example `/usr/src/tensorrt/data/`, the data directory must be specified.
-	For example: `python sample.py -d /path/to/my/data/`.
-
-4.  Verify that the sample ran successfully. If the sample runs successfully you should see a match between the test case and the prediction.
+3.  Verify that the sample ran successfully. If the sample runs successfully you should see output similar to the following:
 	```
-	Test Case: 2
-	Prediction: 2
+	&&&& RUNNING TensorRT.sample_char_rnn # ./sample_char_rnn
+	[I] [TRT] Detected 4 input and 3 output network tensors.
+	[I] RNN Warmup: JACK
+	[I] Expect: INGHAM:
+	What shall I
+	[I] Received: INGHAM:
+	What shall I
+	&&&& PASSED TensorRT.sample_char_rnn # ./sample_char_rnn
 	```
+	This output shows that the sample ran successfully; `PASSED`.
 
 ### Sample --help options
 
-To see the full list of available options and their descriptions, use the `-h` or `--help` command line option. For example:
-```
-usage: sample.py [-h] [-d DATADIR]
+To see the full list of available options and their descriptions, use the `-h` or `--help` command line option.
 
-Runs an MNIST network using a UFF model file
-
-optional arguments:
- -h, --help            show this help message and exit
- -d DATADIR, --datadir DATADIR
-                       Location of the TensorRT sample data directory.
-                       (default: /usr/src/tensorrt/data)
-```
 
 # Additional resources
 
-The following resources provide a deeper understanding about training and running inference in TensorRT using Python:
+The following resources provide a deeper understanding about RNN networks:
 
-**Model**
-- [TensorFlow/Keras MNIST](https://www.tensorflow.org/tutorials)
+**RNN networks**
+- [GNMT](https://arxiv.org/pdf/1609.08144v1.pdf)
+- [NMT](https://arxiv.org/pdf/1701.02810.pdf)
+- [Transformer](https://arxiv.org/pdf/1706.03762.pdf)
 
-**Dataset**
-- [MNIST database](http://yann.lecun.com/exdb/mnist/)
+**Videos**
+- [Introduction to RNNs in TensorRT](https://www.youtube.com/watch?reload=9&v=G3QA3ZzD4oc)
 
 **Documentation**
-- [Introduction To NVIDIA’s TensorRT Samples](https://docs.nvidia.com/deeplearning/sdk/tensorrt-sample-support-guide/index.html#samples)
-- [Working With TensorRT Using The Python API](https://docs.nvidia.com/deeplearning/sdk/tensorrt-developer-guide/index.html#python_topics)
+- [TensorRT Sample Support Guide: sampleCharRNN](https://docs.nvidia.com/deeplearning/sdk/tensorrt-sample-support-guide/index.html#charRNN_sample)
 - [NVIDIA’s TensorRT Documentation Library](https://docs.nvidia.com/deeplearning/sdk/tensorrt-archived/index.html)
 
 # License
 
-For terms and conditions for use, reproduction, and distribution, see the [TensorRT Software License Agreement](https://docs.nvidia.com/deeplearning/sdk/tensorrt-sla/index.html) documentation.
+For terms and conditions for use, reproduction, and distribution, see the [TensorRT Software License Agreement](https://docs.nvidia.com/deeplearning/sdk/tensorrt-sla/index.html) 
+documentation.
 
 
 # Changelog
 
 February 2019
-This `README.md` file was recreated, updated and reviewed.
+This is the first release of this `README.md` file.
 
 
 # Known issues
